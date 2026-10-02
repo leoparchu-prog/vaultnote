@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types vaultnote">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)">
@@ -363,6 +363,11 @@ svg { display: block; }
 .gen-slider-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .gen-slider input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); height: 28px; }
 .privacy-cover { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: var(--bg); }
+
+/* ===== [1.1] 비밀번호 엿보기 · 경고 배너 ===== */
+.pw-peek { padding: 0 16px 12px 104px; margin-top: -4px; font-family: var(--mono); font-size: 16px; color: var(--label); word-break: break-all; -webkit-user-select: none; user-select: none; }
+.banner.warn-banner { background: color-mix(in srgb, var(--danger) 14%, var(--cell)); }
+.banner.warn-banner .banner-title { color: var(--danger); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
