@@ -1,12 +1,13 @@
 'use strict';
 /*
- * VaultNote — 4단계: 보안 편의 기능 (자동 잠금, 클립보드 삭제, 비밀번호 생성기, 비밀번호 변경)
+ * VaultNote — 5단계: 홈 화면 설치·오프라인 동작·수동 업데이트 (1~4단계 포함)
+ * 새 버전을 올릴 때는 이 APP_VERSION과 sw.js의 VERSION을 똑같이 올린다 (PRD 10-5).
  * 구조 원칙(PRD 10장): 상태 하나(state) → 변경 함수 하나(commit) → 화면 전체 다시 그리기(render)
  * 예외(10-1): 글자를 입력하는 중에는 입력창을 다시 만들지 않는다(한글 조합 보호).
  */
 
 // ===== [CONFIG] =====
-const APP_VERSION = '0.4.0';
+const APP_VERSION = '0.5.0';
 const KDF_ITERATIONS = 600000;    // PRD 3장. 낮추지 않는다.
 const MIN_PASSWORD = 12;          // F-1
 const MAX_DEPTH = 5;              // 폴더 최대 깊이 (PRD 2장)
@@ -617,6 +618,8 @@ const state = {
   expectExternal: false,   // 파일 선택 창 등으로 잠시 나가는 중
   persisted: null,         // 브라우저 영구 보관 허용 여부
   gen: null,               // 비밀번호 생성기 설정과 결과
+  sw: { supported: false, controlled: false, activeVersion: null, waiting: null, waitingVersion: null, error: false },
+  installPrompt: null,     // 크롬의 '앱 설치' 요청 (있을 때만)
   scroll: {},
   anim: null,
   focusField: null,
@@ -1014,6 +1017,7 @@ function onReturn() {
   }
   hidePrivacyCover();
   setTimeout(clearClipboard, 300);              // 포커스가 돌아온 뒤 시도
+  checkForUpdate(false);
 }
 // 파일 선택 창은 잠시 앱을 떠나므로 그동안은 잠그지 않는다
 async function withExternal(fn) {
@@ -1105,6 +1109,103 @@ async function changeMasterPassword() {
   }
 }
 
+// ----- 오프라인 · 설치 · 수동 업데이트 (5단계, F-7) -----
+let swReg = null;
+function isStandalone() {
+  return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+}
+// 입력 중이면 다시 그리지 않는다 (10-1 예외 규칙). 다음 동작 때 반영된다.
+function softRender() {
+  const a = document.activeElement;
+  if (a && a.dataset && a.dataset.field) return;
+  render();
+}
+function askVersion(worker) {
+  return new Promise((resolve) => {
+    if (!worker) { resolve(null); return; }
+    const ch = new MessageChannel();
+    const t = setTimeout(() => resolve(null), 2000);
+    ch.port1.onmessage = (e) => { clearTimeout(t); resolve(e.data); };
+    worker.postMessage({ type: 'version' }, [ch.port2]);
+  });
+}
+async function noteWaiting(worker) {
+  state.sw.waiting = worker;
+  state.sw.waitingVersion = await askVersion(worker);
+  softRender();
+}
+async function initServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  state.sw.supported = true;
+  try {
+    swReg = await navigator.serviceWorker.register('sw.js', { scope: './' });
+    const ctrl = navigator.serviceWorker.controller;
+    state.sw.controlled = !!ctrl;
+    state.sw.activeVersion = await askVersion(ctrl || swReg.active);
+    if (swReg.waiting && ctrl) noteWaiting(swReg.waiting);
+    swReg.addEventListener('updatefound', () => {
+      const nw = swReg.installing;
+      if (!nw) return;
+      nw.addEventListener('statechange', async () => {
+        if (nw.state === 'installed' && navigator.serviceWorker.controller) noteWaiting(nw);
+        if (nw.state === 'activated' && !state.sw.controlled) {   // 첫 설치: 이제 오프라인으로 쓸 수 있다
+          state.sw.controlled = true;
+          state.sw.activeVersion = await askVersion(nw);
+          softRender();
+        }
+      });
+    });
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (state.sw.reloading) location.reload();
+    });
+    softRender();
+  } catch {
+    state.sw.error = true;
+  }
+}
+async function checkForUpdate(showResult) {
+  if (!swReg) { if (showResult) showToast('이 화면에서는 업데이트를 확인할 수 없습니다.'); return; }
+  try {
+    await swReg.update();
+    if (showResult) {
+      setTimeout(() => showToast(state.sw.waiting ? `새 버전 ${state.sw.waitingVersion || ''}이 있습니다.` : '지금이 최신 버전입니다. 방금 올렸다면 최대 10분 뒤 다시 확인하세요.'), 1500);
+    }
+  } catch {
+    if (showResult) showToast('업데이트를 확인하지 못했습니다. 인터넷 연결을 확인하세요.');
+  }
+}
+function confirmUpdate() {
+  if (!state.sw.waiting) return;
+  const last = state.meta.lastBackupAt;
+  state.alert = {
+    title: `새 버전 ${state.sw.waitingVersion || ''}로 업데이트할까요?`, fresh: true,
+    message: `업데이트 전에 백업을 권장합니다. 마지막 백업: ${last ? dateFmt.format(last) : '없음'}\n\n직접 코드를 올린 적이 없는데 이 안내가 떴다면 업데이트하지 말고 GitHub 계정을 점검하세요.\n업데이트 후에는 다시 잠금 해제해야 합니다.`,
+    buttons: [
+      { label: '먼저 백업', bold: true, run: () => exportBackup() },
+      { label: '업데이트', run: () => applyUpdate() },
+      { label: '취소' },
+    ],
+  };
+  render();
+}
+async function applyUpdate() {
+  const w = state.sw.waiting;
+  if (!w) return;
+  state.busy = '업데이트 중…';
+  render();
+  await saveChain;
+  state.sw.reloading = true;
+  w.postMessage({ type: 'skipWaiting' });
+  setTimeout(() => location.reload(), 4000); // controllerchange가 오지 않을 때를 대비
+}
+async function installApp() {
+  const p = state.installPrompt;
+  if (!p) return;
+  state.installPrompt = null;
+  try { await p.prompt(); } catch { /* 사용자가 닫음 */ }
+  render();
+}
+
 // ----- 설정: 저장 상태 · 자가 테스트 (10-4) -----
 async function loadStorageInfo() {
   try {
@@ -1181,6 +1282,13 @@ async function runSelfTest() {
       if (p.length !== 20 || !/[A-Z]/.test(p) || !/[a-z]/.test(p) || !/[0-9]/.test(p) || !/[^A-Za-z0-9]/.test(p)) genOk = false;
     }
     add('비밀번호 생성기 (200개 검사)', genOk);
+
+    if (state.sw.controlled) {
+      add('오프라인 사용 준비 (설치된 코드 버전 일치)', state.sw.activeVersion === APP_VERSION,
+        state.sw.activeVersion === APP_VERSION ? '' : `앱 ${APP_VERSION}, 저장된 코드 ${state.sw.activeVersion || '알 수 없음'} — sw.js VERSION을 확인하세요`);
+    } else {
+      add('오프라인 사용 준비', null, state.sw.supported ? '처음 접속 후 한 번 새로고침하면 준비됩니다' : '이 화면에서는 확인할 수 없습니다');
+    }
 
     const prev = await readSlot('previous');
     add('직전 저장본 보관', prev ? true : null, prev ? '' : '아직 한 번만 저장되었습니다');
@@ -1565,7 +1673,7 @@ function renderHome() {
 }
 function homeBody() {
   const q = state.search.trim();
-  const out = [backupBanner()];
+  const out = [updateBanner(), backupBanner()];
   if (q) {
     out.push(...searchResults(q));
   } else if (!state.tree.children.length) {
@@ -1583,6 +1691,14 @@ function homeBody() {
   }
   out.push(memoryNotice());
   return out;
+}
+function updateBanner() {
+  if (!state.sw.waiting) return null;
+  return h('div', { class: 'banner', role: 'note' },
+    h('div', { class: 'banner-title', text: `새 버전 ${state.sw.waitingVersion || ''}이 있습니다` }),
+    h('div', { class: 'banner-text', text: '누를 때만 바뀝니다. 업데이트 전에 백업을 권장합니다.' }),
+    h('div', { class: 'banner-actions' },
+      h('button', { class: 'nav-btn bold', 'data-action': 'update-app' }, '업데이트')));
 }
 function backupBanner() {
   if (state.bannerDismissed || state.search.trim() || !countEntries(state.tree)) return null;
@@ -1806,6 +1922,18 @@ function renderSettings() {
       settingsRow('restore-previous', '직전 저장본으로 되돌리기'),
       settingsRow('export-text', '평문 텍스트로 내보내기', true)),
     h('p', { class: 'group-footer', text: `마지막 백업: ${state.meta.lastBackupAt ? dateFmt.format(state.meta.lastBackupAt) : '없음'}. 백업 파일은 다운로드 폴더에 저장됩니다. SD카드·PC 등 폰 밖 2곳에 옮겨 보관하세요.` }),
+    h('div', { class: 'group-header', text: '앱' }),
+    h('div', { class: 'group' },
+      kvRow('오프라인 사용', h('div', { class: 'kv-value', text: state.sw.controlled ? '준비됨' : state.sw.supported ? '준비 중 (한 번 새로고침하면 준비됩니다)' : '이 화면에서는 쓸 수 없음' })),
+      kvRow('설치 방식', h('div', { class: 'kv-value', text: isStandalone() ? '홈 화면 앱' : '브라우저 탭' })),
+      kvRow('저장된 코드 버전', h('div', { class: 'kv-value', text: state.sw.activeVersion || '-' })),
+      state.sw.waiting
+        ? settingsValueRow('update-app', '새 버전으로 업데이트', state.sw.waitingVersion || '')
+        : settingsRow('check-update', '업데이트 확인'),
+      state.installPrompt ? settingsRow('install-app', '홈 화면에 설치') : null),
+    h('p', { class: 'group-footer', text: isStandalone()
+      ? '새 버전은 자동으로 적용되지 않습니다. 직접 코드를 올렸을 때만 업데이트를 승인하세요.'
+      : '크롬 메뉴(⋮) → ‘홈 화면에 추가’ 또는 ‘앱 설치’로 설치하면 전체 화면 앱처럼 쓸 수 있습니다.' }),
     h('div', { class: 'group-header', text: '점검' }),
     h('div', { class: 'group' },
       h('button', { class: 'row-btn center', 'data-action': 'self-test' }, '자가 테스트 실행')),
@@ -1827,7 +1955,7 @@ function renderSettings() {
   content.push(
     h('div', { class: 'group-header', text: '정보' }),
     h('div', { class: 'group' }, kvRow('버전', h('div', { class: 'kv-value', text: APP_VERSION }))),
-    h('p', { class: 'stage-note', text: '4단계: 보안 편의 기능. 홈 화면 설치·오프라인 동작은 5단계에서 추가됩니다.' }));
+    h('p', { class: 'stage-note', text: '5단계: 홈 화면 설치·오프라인. 다음은 6단계 검토와 실사용 전환입니다.' }));
   return screen(nav, content);
 }
 
@@ -2041,7 +2169,7 @@ function renderAlert() {
         class: 'alert-input', type: a.inputType || 'text', 'data-field': 'alertValue', value: a.value,
         placeholder: a.placeholder || '', enterkeyhint: 'done', maxlength: '60', 'aria-label': a.placeholder || a.title, ...INPUT_ATTRS,
       }) : null),
-    h('div', { class: 'alert-actions' },
+    h('div', { class: 'alert-actions' + (a.buttons.length > 2 ? ' stack' : '') },
       a.buttons.map((b, i) => h('button', {
         class: 'alert-btn' + (b.bold ? ' bold' : '') + (b.danger ? ' danger' : ''), 'data-action': 'alert-btn', 'data-index': String(i),
       }, b.label))));
@@ -2072,6 +2200,9 @@ const actions = {
   'change-pw': () => { state.form = {}; state.focusField = 'form:curPw'; push({ name: 'change-pw' }); },
   'change-pw-confirm': () => changeMasterPassword(),
   'open-generator': () => openGenerator(),
+  'update-app': () => confirmUpdate(),
+  'check-update': () => checkForUpdate(true),
+  'install-app': () => installApp(),
   'gen-refresh': () => regenerate(),
   'gen-use': () => useGenerated(),
   'backup': () => exportBackup(),
@@ -2275,6 +2406,10 @@ window.addEventListener('blur', () => { if (!state.expectExternal) showPrivacyCo
 window.addEventListener('focus', () => { hidePrivacyCover(); clearClipboard(); });
 window.addEventListener('pageshow', () => { if (!document.hidden) onReturn(); });
 
+// 크롬의 '앱 설치' 요청을 받아 두었다가 설정 화면에서 보여준다
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); state.installPrompt = e; softRender(); });
+window.addEventListener('appinstalled', () => { state.installPrompt = null; softRender(); });
+
 // 안드로이드 뒤로 가기 버튼
 window.addEventListener('popstate', () => {
   if (pendingBack > 0) { pendingBack--; if (state.phase === 'open') popScreen(); return; }
@@ -2320,5 +2455,6 @@ async function init() {
     state.errorMessage = '저장된 데이터를 읽지 못했습니다. 앱을 다시 열어 보세요.';
   }
   render();
+  initServiceWorker();
 }
 init();

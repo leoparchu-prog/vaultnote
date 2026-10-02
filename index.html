@@ -9,6 +9,9 @@
 <meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <title>VaultNote</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
 /* ===== [TOKENS] PRD 11장 애플 앱 스타일 ===== */
 :root {
@@ -272,6 +275,8 @@ svg { display: block; }
 .alert-actions { display: flex; border-top: 0.5px solid var(--sep); }
 .alert-btn { flex: 1; min-height: 46px; color: var(--accent); }
 .alert-btn + .alert-btn { border-left: 0.5px solid var(--sep); }
+.alert-actions.stack { flex-direction: column; }
+.alert-actions.stack .alert-btn + .alert-btn { border-left: 0; border-top: 0.5px solid var(--sep); }
 .alert-btn.bold { font-weight: 600; }
 .alert-btn:active { background: var(--pressed); }
 
