@@ -1,14 +1,15 @@
 'use strict';
 /*
- * VaultNote — 5단계: 홈 화면 설치·오프라인 동작·수동 업데이트 (1~4단계 포함)
+ * VaultNote 1.0 — 6단계 보안 검토 반영 (1~5단계 기능 포함)
  * 새 버전을 올릴 때는 이 APP_VERSION과 sw.js의 VERSION을 똑같이 올린다 (PRD 10-5).
  * 구조 원칙(PRD 10장): 상태 하나(state) → 변경 함수 하나(commit) → 화면 전체 다시 그리기(render)
  * 예외(10-1): 글자를 입력하는 중에는 입력창을 다시 만들지 않는다(한글 조합 보호).
  */
 
 // ===== [CONFIG] =====
-const APP_VERSION = '0.5.0';
+const APP_VERSION = '1.0.0';
 const KDF_ITERATIONS = 600000;    // PRD 3장. 낮추지 않는다.
+const MAX_ITERATIONS = 5000000;   // 조작된 파일로 기기를 멈추게 하는 것 방지
 const MIN_PASSWORD = 12;          // F-1
 const MAX_DEPTH = 5;              // 폴더 최대 깊이 (PRD 2장)
 const UNDO_MS = 5000;             // 삭제 실행 취소 시간 (F-2)
@@ -164,7 +165,7 @@ async function decryptRecord(key, rec) {
 }
 function isValidRecord(r) {
   return !!r && r.format === 'vaultnote' && r.version === 1 && r.kdf === 'PBKDF2-SHA256'
-    && Number.isInteger(r.iterations) && r.iterations >= 100000
+    && Number.isInteger(r.iterations) && r.iterations >= 100000 && r.iterations <= MAX_ITERATIONS
     && typeof r.salt === 'string' && typeof r.iv === 'string' && typeof r.ciphertext === 'string';
 }
 function isValidPayload(p) {
@@ -194,6 +195,7 @@ function generatePassword(opts) {
   }
   return chars.join('');
 }
+const WEAK_MESSAGE = '너무 단순한 비밀번호입니다. 단어 4개 이상을 띄어 쓰거나 숫자·기호를 섞어 주세요.';
 function passwordStrength(pw) {
   if (!pw) return { level: 0, label: '' };
   let classes = 0;
@@ -241,25 +243,33 @@ async function readSlot(name) {
   });
 }
 // 한 트랜잭션 안에서 현재 → 직전, 새 암호문 → 현재. 전부 성공하거나 전부 실패한다.
+// 다른 창이 그사이 저장했다면(writeId가 다르면) 덮어쓰지 않고 'conflict'로 실패한다
 async function writeRecord(rec) {
+  const expected = state.writeId;
+  rec.writeId = uid();                       // 비밀이 아닌 저장 번호 (충돌 감지용)
   if (memoryStore) {
+    if (memoryStore.current && memoryStore.current.writeId !== expected) throw new Error('conflict');
     if (memoryStore.current) memoryStore.previous = memoryStore.current;
     memoryStore.current = rec;
+    state.writeId = rec.writeId;
     return;
   }
   const db = await getDB();
-  return new Promise((resolve, reject) => {
+  await new Promise((resolve, reject) => {
+    let conflict = false;
     const tx = db.transaction(DB_STORE, 'readwrite');
     const store = tx.objectStore(DB_STORE);
     const cur = store.get('current');
     cur.onsuccess = () => {
+      if (cur.result && cur.result.writeId !== expected) { conflict = true; tx.abort(); return; }
       if (cur.result) store.put(cur.result, 'previous');
       store.put(rec, 'current');
     };
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error || new Error('저장이 취소되었습니다'));
+    tx.onerror = () => reject(conflict ? new Error('conflict') : tx.error);
+    tx.onabort = () => reject(conflict ? new Error('conflict') : (tx.error || new Error('저장이 취소되었습니다')));
   });
+  state.writeId = rec.writeId;
 }
 // 여러 슬롯을 한 트랜잭션으로 쓴다 (값이 null이면 지움). 비밀번호 변경·실패 횟수 기록용
 async function writeSlots(slots) {
@@ -294,7 +304,10 @@ function saveVault(tree) {
       await writeRecord(await encryptPayload(session, payload));
       state.lastSavedAt = payload.savedAt;
     })
-    .catch(() => showToast('저장하지 못했습니다. 기존 저장본은 그대로 남아 있습니다.'));
+    .catch((e) => {
+      if (e && e.message === 'conflict') lockVault('다른 창에서 금고가 바뀌어 이 창을 잠갔습니다. 다시 열면 최신 내용이 보입니다.');
+      else showToast('저장하지 못했습니다. 기존 저장본은 그대로 남아 있습니다.');
+    });
 }
 
 // ===== [TREE] 화면을 건드리지 않는 트리 조작 함수 =====
@@ -309,6 +322,44 @@ function makeEntry(f) {
     title: f.title || '', url: f.url || '', username: f.username || '', password: f.password || '', memo: f.memo || '',
     createdAt: t, updatedAt: t,
   };
+}
+// 불러온 트리를 검사해 정리한다 (손상·옛 형식 대비). 정상 트리는 그대로 나온다
+function sanitizeTree(input) {
+  const seen = new Set(['root']);
+  const str = (v, max) => (typeof v === 'string' ? v : v == null ? '' : String(v)).slice(0, max);
+  const num = (v) => (Number.isFinite(v) ? v : now());
+  const goodId = (v) => {
+    const id = typeof v === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(v) && !seen.has(v) ? v : uid();
+    seen.add(id);
+    return id;
+  };
+  const src = input && typeof input === 'object' ? input : {};
+  const root = {
+    id: 'root', type: 'folder', name: '전체', sort: src.sort === 'manual' ? 'manual' : 'name', children: [],
+    createdAt: num(src.createdAt), updatedAt: num(src.updatedAt),
+  };
+  (function fill(from, to, depth) {
+    const kids = Array.isArray(from && from.children) ? from.children : [];
+    for (const c of kids) {
+      if (!c || typeof c !== 'object') continue;
+      if (c.type === 'folder') {
+        if (depth >= MAX_DEPTH) { fill(c, to, depth); continue; }   // 너무 깊으면 위 폴더에 합친다
+        const f = {
+          id: goodId(c.id), type: 'folder', name: str(c.name, 200) || '이름 없는 폴더',
+          sort: c.sort === 'manual' ? 'manual' : 'name', children: [], createdAt: num(c.createdAt), updatedAt: num(c.updatedAt),
+        };
+        to.children.push(f);
+        fill(c, f, depth + 1);
+      } else if (c.type === 'entry') {
+        to.children.push({
+          id: goodId(c.id), type: 'entry', title: str(c.title, 200) || '제목 없음',
+          url: str(c.url, 2000), username: str(c.username, 500), password: str(c.password, 1000), memo: str(c.memo, 20000),
+          createdAt: num(c.createdAt), updatedAt: num(c.updatedAt),
+        });
+      }
+    }
+  })(src, root, 0);
+  return root;
 }
 function emptyTree() { const r = makeFolder('전체'); r.id = 'root'; return r; }
 function nameOf(node) { return node.type === 'folder' ? node.name : node.title; }
@@ -600,6 +651,7 @@ const state = {
   busy: null,              // 처리 중 안내 문구
   unlockMs: null,          // 마지막 잠금 해제(키 생성) 시간
   lastSavedAt: null,
+  writeId: undefined,      // 마지막으로 읽거나 쓴 저장 번호 (다른 창 충돌 감지)
   storageInfo: null,
   selfTest: null,
   expanded: new Set(),
@@ -681,12 +733,14 @@ async function createVault() {
   const f = state.form;
   const pw = f.setupPw || '';
   if (Array.from(pw).length < MIN_PASSWORD) return formError(`마스터 비밀번호는 ${MIN_PASSWORD}자 이상이어야 합니다.`);
+  if (passwordStrength(pw).level < 2) return formError(WEAK_MESSAGE);
   if (pw !== (f.setupPw2 || '')) return formError('비밀번호 확인이 일치하지 않습니다.');
   if (!f.agree) return formError('복구 불가 안내를 확인하고 동의해 주세요.');
   state.busy = '금고를 만드는 중…';
   render();
   try {
     if (await readSlot('current')) throw new Error('이미 금고가 있습니다.'); // 기존 금고 덮어쓰기 방지
+    state.writeId = undefined;
     const salt = randomBytes(16);
     const t0 = performance.now();
     const key = await deriveKey(pw, salt, KDF_ITERATIONS);
@@ -749,7 +803,8 @@ async function unlockVault() {
     if (guard.fails || guard.until) await writeSlots({ guard: { fails: 0, until: 0 } });
     state.unlockMs = ms;
     state.lastSavedAt = payload.savedAt || null;
-    openVault({ key, salt, iterations: cur.iterations }, payload.root, payload.meta);
+    state.writeId = cur.writeId;
+    openVault({ key, salt, iterations: cur.iterations }, sanitizeTree(payload.root), payload.meta);
     if (usedPrevious) showToast('최근 저장본을 열 수 없어 직전 저장본을 열었습니다.');
   } catch {
     formError('저장된 금고를 읽지 못했습니다. 백업 파일로 복원이 필요할 수 있습니다.');
@@ -761,6 +816,15 @@ async function unlockVault() {
 function formError(message) {
   state.form.error = message;
   render();
+}
+const instanceId = uid();
+const channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('vaultnote') : null;
+if (channel) {
+  // 다른 창에서 금고를 열면 이 창은 잠근다 (두 창이 서로 덮어쓰는 것 방지)
+  channel.onmessage = (e) => {
+    const d = e.data || {};
+    if (d.type === 'opened' && d.from !== instanceId && state.phase === 'open') lockVault('다른 창에서 금고를 열어 이 창은 잠갔습니다.');
+  };
 }
 function openVault(session, tree, meta) {
   state.session = session;
@@ -778,6 +842,7 @@ function openVault(session, tree, meta) {
   state.lastActivity = now();
   state.hiddenAt = null;
   requestPersist();
+  if (channel) channel.postMessage({ type: 'opened', from: instanceId });
 }
 function lockVault(reason) {
   clearClipboard();
@@ -1065,6 +1130,7 @@ async function changeMasterPassword() {
   const newPw = f.newPw || '';
   if (!curPw) return formError('지금 마스터 비밀번호를 입력하세요.');
   if (Array.from(newPw).length < MIN_PASSWORD) return formError(`새 비밀번호는 ${MIN_PASSWORD}자 이상이어야 합니다.`);
+  if (passwordStrength(newPw).level < 2) return formError(WEAK_MESSAGE);
   if (newPw !== (f.newPw2 || '')) return formError('새 비밀번호 확인이 일치하지 않습니다.');
   if (newPw === curPw) return formError('지금 비밀번호와 다른 비밀번호를 입력하세요.');
   state.busy = '비밀번호를 바꾸는 중…';
@@ -1073,6 +1139,7 @@ async function changeMasterPassword() {
     await saveChain;
     const s = state.session;
     const curRec = await readSlot('current');
+    if (curRec && curRec.writeId !== state.writeId) { state.busy = null; lockVault('다른 창에서 금고가 바뀌어 이 창을 잠갔습니다. 다시 열고 변경해 주세요.'); return; }
     const oldKey = await deriveKey(curPw, s.salt, s.iterations);
     try { await decryptRecord(oldKey, curRec); } catch {
       state.busy = null;
@@ -1090,7 +1157,9 @@ async function changeMasterPassword() {
     const meta = { ...state.meta, pwChangedAt: now() };
     const newCur = await encryptPayload(next, { version: 1, savedAt: now(), root: state.tree, meta });
     const newPrev = prevPayload ? await encryptPayload(next, prevPayload) : null;
+    newCur.writeId = uid();
     await writeSlots({ current: newCur, previous: newPrev });
+    state.writeId = newCur.writeId;
     state.session = next;
     state.meta = meta;
     state.bannerDismissed = false;
@@ -1276,6 +1345,13 @@ async function runSelfTest() {
     add('특수 문자·여러 줄 메모 해석', !!se && se.title === '콜론 #해시' && se.username === ' 앞공백'
       && se.password === 'a: b # c - ' && se.memo === '첫 줄\n\n셋째 줄\n질문: 답' && special.unparsed.length === 0);
 
+    const messy = sanitizeTree({ children: [
+      { type: 'entry', title: 5, password: null }, { type: '알수없음' }, null,
+      { type: 'folder', name: '', children: 'bad' }, { type: 'entry', id: '<x>', title: '' }] });
+    add('손상된 데이터 정리', messy.children.length === 3 && messy.children[0].title === '5' && messy.children[0].password === ''
+      && messy.children[1].name === '이름 없는 폴더' && /^[0-9a-f]{16}$/.test(messy.children[2].id)
+      && JSON.stringify(sanitizeTree(state.tree)) === JSON.stringify(state.tree));
+
     let genOk = true;
     for (let i = 0; i < 200; i++) {
       const p = generatePassword({ length: 20, upper: true, lower: true, digits: true, symbols: true });
@@ -1348,10 +1424,12 @@ async function openBackup(rec, pw, mode) {
   } catch { payload = null; }
   state.busy = null;
   if (!isValidPayload(payload)) { showToast('비밀번호가 맞지 않거나 파일이 손상되었습니다.'); return; }
+  payload.root = sanitizeTree(payload.root);
   const n = countEntries(payload.root);
   if (mode === 'new') {
     try {
       if (await readSlot('current')) throw new Error('exists');
+      state.writeId = undefined;
       const session = { key, salt, iterations: rec.iterations };
       const meta = payload.meta || {};
       const savedAt = now();
@@ -1402,7 +1480,7 @@ async function restorePrevious() {
     const p = await decryptRecord(state.session.key, prev);
     if (!isValidPayload(p)) throw new Error('bad');
     state.busy = null;
-    replaceTree(p.root); // 설정(자동 잠금 등)은 되돌리지 않고 데이터만 되돌린다
+    replaceTree(sanitizeTree(p.root)); // 설정(자동 잠금 등)은 되돌리지 않고 데이터만 되돌린다
     showToast('직전 저장본으로 되돌렸습니다.');
   } catch (e) {
     state.busy = null;
@@ -1955,7 +2033,7 @@ function renderSettings() {
   content.push(
     h('div', { class: 'group-header', text: '정보' }),
     h('div', { class: 'group' }, kvRow('버전', h('div', { class: 'kv-value', text: APP_VERSION }))),
-    h('p', { class: 'stage-note', text: '5단계: 홈 화면 설치·오프라인. 다음은 6단계 검토와 실사용 전환입니다.' }));
+    h('p', { class: 'stage-note', text: `VaultNote ${APP_VERSION}. 서버 없이 이 기기에만 암호화해 저장합니다.` }));
   return screen(nav, content);
 }
 
@@ -2431,6 +2509,12 @@ window.addEventListener('popstate', () => {
 
 // ===== [INIT] =====
 async function init() {
+  if (window.top !== window.self) {               // 다른 사이트 안에 끼워 넣어 쓰는 것 방지
+    state.phase = 'error';
+    state.errorMessage = '다른 사이트 안에서는 열 수 없습니다. 주소창에 앱 주소를 직접 입력해 열어 주세요.';
+    render();
+    return;
+  }
   try {
     history.replaceState({ vn: 1 }, '');
     state.historyOK = true;

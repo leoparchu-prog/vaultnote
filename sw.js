@@ -4,7 +4,7 @@
  * 새 버전을 올릴 때는 이 VERSION과 app.js의 APP_VERSION을 똑같이 올린다.
  * 새 버전은 자동으로 적용되지 않는다. 앱에서 사용자가 "업데이트"를 눌러야 적용된다.
  */
-const VERSION = '0.5.0';
+const VERSION = '1.0.0';
 const CACHE = `vaultnote-${VERSION}`;
 const FILES = ['./', './index.html', './app.js', './manifest.json', './icon-192.png', './icon-512.png'];
 
