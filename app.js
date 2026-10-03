@@ -7,7 +7,7 @@
  */
 
 // ===== [CONFIG] =====
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 const KDF_ITERATIONS = 600000;    // PRD 3장. 낮추지 않는다.
 const MAX_ITERATIONS = 5000000;   // 조작된 파일로 기기를 멈추게 하는 것 방지
 const MIN_PASSWORD = 12;          // F-1
@@ -30,6 +30,7 @@ const SNAP_KEEP = { daily: 7, protected: 5 }; // 저장본 기록: 하루 첫 �
 const DB_NAME = 'vaultnote';
 const DB_STORE = 'vault';
 const TILE_COLORS = ['#007AFF', '#34C759', '#FF9500', '#FF2D55', '#AF52DE', '#5856D6', '#FF3B30', '#30B0C7', '#A2845E'];
+const DISCLAIMER = '개인이 가족·지인과 나누려고 만든 앱이며, 전문 보안 검증을 받지 않았고 어떤 보증도 하지 않습니다. 데이터 손실에 대비해 백업을 꼭 만들어 두세요.';
 const INPUT_ATTRS = { autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false' }; // 10-2
 
 // ===== [UTILS] =====
@@ -1972,6 +1973,7 @@ function renderSetup() {
         h('span', { class: 'toggle-text', text: '테스트용 가짜 데이터로 시작' }),
         h('input', { type: 'checkbox', class: 'switch', 'data-field': 'form:sample', checked: !!f.sample }))),
     f.error ? h('p', { class: 'error-text', role: 'alert', text: f.error }) : null,
+    h('p', { class: 'disclaimer', text: `${DISCLAIMER} 사용 설명서와 라이선스는 이 앱을 받은 GitHub 저장소의 README를 보세요.` }),
     h('button', { class: 'primary-btn', 'data-action': 'create-vault' }, '금고 만들기'),
     h('button', { class: 'text-btn', 'data-action': 'restore-backup-new' }, '백업 파일로 복원하기'),
     memoryNotice(),
@@ -2322,7 +2324,8 @@ function renderSettings() {
   }
   content.push(
     h('div', { class: 'group-header', text: '정보' }),
-    h('div', { class: 'group' }, kvRow('버전', h('div', { class: 'kv-value', text: APP_VERSION }))),
+    h('div', { class: 'group' }, kvRow('버전', h('div', { class: 'kv-value', text: APP_VERSION })), kvRow('라이선스', h('div', { class: 'kv-value', text: 'MIT (저장소의 LICENSE 파일)' }))),
+    h('p', { class: 'group-footer', text: DISCLAIMER }),
     h('p', { class: 'stage-note', text: `VaultNote ${APP_VERSION}. 서버 없이 이 기기에만 암호화해 저장합니다.` }));
   return screen(nav, content);
 }

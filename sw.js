@@ -6,10 +6,10 @@
  * 이 확인 단계는 실수를 막는 장치이며, 서버(GitHub 계정)가 해킹되면 막지 못한다.
  * FILE_HASHES는 배포할 때 계산해 넣는다. 받은 파일이 목록과 다르면 설치하지 않는다(배포 도중 섞임 방지).
  */
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 const FILE_HASHES = {
-  "./index.html": "97c34ae75f0a3e6077e9ec2f8ddc133c7a2320a6a96c9eaa673a97ffffb574a4",
-  "./app.js": "36f13e9d3554b9cc8f9d7e3ea7b188c346be378b3d6824a6d4b889ac3b8b6e9d",
+  "./index.html": "4e653df4fd9d37ee9c608742dc27c78a80f3f43e2217d8aa2b1c727d1658f93f",
+  "./app.js": "fd22977e8829960251312a6d7c560641cd3c5d2364a93429605d52a6577ec7da",
   "./manifest.json": "97ec42e8c32513cfb38bc4755b172502eea2e9c3b0261b875d27bb2510bf0177",
   "./icon-192.png": "6cbe6d09cae7481cc13e643d9f453753dd8f28d56863dbb9ad566dc43c6feb7d",
   "./icon-512.png": "0ba88462de645afa916cf524533421d6820a2f59314f5ffb04fcc55cc84b57cd"
